@@ -1,11 +1,13 @@
-// import { type WorkerOptions } from 'worker_threads'
+import './worker-polyfill.js'
+
+import { createTestWorker } from './worker.ts'
 import { expect, test, describe } from 'vitest'
 import { Mutex } from '../src/index'
-import { Counter } from './counter'
-
-import { Worker } from './worker.cjs'
+import { Counter } from './counter.js'
 
 describe('Mutex', () => {
+  const workerUrl = new URL('./mutex.test.worker.js', import.meta.url)
+
   test('lock and unlock', () => {
     const mutex = new Mutex(new Int32Array(1))
     const lock = Mutex.lock(mutex)
@@ -44,9 +46,9 @@ describe('Mutex', () => {
   })
 
   test('unsafely increase counter', () => {
-    const counter = new Counter()
-    const worker1 = new Worker(new URL('./mutex.test.worker.cjs', import.meta.url))
-    const worker2 = new Worker(new URL('./mutex.test.worker.cjs', import.meta.url))
+    const counter = new Counter(Mutex)
+    const { worker: worker1, promise: worker1Promise } = createTestWorker(workerUrl, { type: 'module' })
+    const { worker: worker2, promise: worker2Promise } = createTestWorker(workerUrl, { type: 'module' })
     const worker1Iteration = 10000
     const worker2Iteration = 10000
     worker1.postMessage({
@@ -58,26 +60,6 @@ describe('Mutex', () => {
       buffer: counter.buffer,
       iteration: worker2Iteration,
       type: 'unsafeIncrease'
-    })
-    const worker1Promise = new Promise<void>((resolve, reject) => {
-      worker1.onerror = (e) => {
-        reject(e)
-      }
-      worker1.onmessage = (e) => {
-        if (e.data === 'done') {
-          resolve()
-        }
-      }
-    })
-    const worker2Promise = new Promise<void>((resolve, reject) => {
-      worker2.onerror = (e) => {
-        reject(e)
-      }
-      worker2.onmessage = (e) => {
-        if (e.data === 'done') {
-          resolve()
-        }
-      }
     })
     return Promise.all([worker1Promise, worker2Promise]).then(() => {
       expect(counter.value).toBeLessThanOrEqual(worker1Iteration + worker2Iteration)
@@ -85,9 +67,9 @@ describe('Mutex', () => {
   })
 
   test('safely increase counter', async () => {
-    const counter = new Counter()
-    const worker1 = new Worker(new URL('./mutex.test.worker.cjs', import.meta.url))
-    const worker2 = new Worker(new URL('./mutex.test.worker.cjs', import.meta.url))
+    const counter = new Counter(Mutex)
+    const { worker: worker1, promise: worker1Promise } = createTestWorker(workerUrl, { type: 'module' })
+    const { worker: worker2, promise: worker2Promise } = createTestWorker(workerUrl, { type: 'module' })
     const worker1Iteration = 10000
     const worker2Iteration = 10000
     worker1.postMessage({
@@ -99,26 +81,6 @@ describe('Mutex', () => {
       buffer: counter.buffer,
       iteration: worker2Iteration,
       type: 'increase'
-    })
-    const worker1Promise = new Promise<void>((resolve, reject) => {
-      worker1.onerror = (e) => {
-        reject(e)
-      }
-      worker1.onmessage = (e) => {
-        if (e.data === 'done') {
-          resolve()
-        }
-      }
-    })
-    const worker2Promise = new Promise<void>((resolve, reject) => {
-      worker2.onerror = (e) => {
-        reject(e)
-      }
-      worker2.onmessage = (e) => {
-        if (e.data === 'done') {
-          resolve()
-        }
-      }
     })
     return Promise.all([worker1Promise, worker2Promise]).then(() => {
       expect(counter.value).toBe(worker1Iteration + worker2Iteration)

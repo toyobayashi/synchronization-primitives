@@ -1,12 +1,21 @@
-import { Mutex } from "../lib/mutex.js"
-
 export class Counter {
   #valueView
 
-  constructor (buffer) {
+  constructor (Mutex, buffer) {
     this.buffer = buffer ?? new SharedArrayBuffer(8)
     this.#valueView = new Int32Array(this.buffer, 0, 1)
-    this.mutex = new Mutex(new Int32Array(this.buffer, 4, 1))
+
+    class LocableMutex extends Mutex {
+      constructor (buffer) {
+        super(buffer)
+      }
+
+      lock () {
+        return Mutex.lock(this)
+      }
+    }
+
+    this.mutex = new LocableMutex(new Int32Array(this.buffer, 4, 1))
   }
 
   get value () {
@@ -18,7 +27,7 @@ export class Counter {
   }
 
   increase () {
-    const lock = Mutex.lock(this.mutex)
+    const lock = this.mutex.lock()
     try {
       this.value++
     } finally {
