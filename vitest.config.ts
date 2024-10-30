@@ -5,6 +5,11 @@ export default defineConfig({
     browser: {
       provider: 'playwright',
       name: 'chromium',
+      providerOptions: {
+        launch: {
+          devtools: true,
+        },
+      },
     },
   },
   server: {

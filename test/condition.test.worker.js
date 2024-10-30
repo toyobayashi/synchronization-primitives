@@ -1,6 +1,5 @@
 import './worker-polyfill.js'
-import { Mutex } from '../lib/mutex.js'
-import { Condition } from '../lib/condition.js'
+import { Mutex, Condition } from '../lib/index.js'
 
 self.onmessage = function (e) {
   const { type, iteration, buffer, payload } = e.data

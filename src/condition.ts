@@ -1,13 +1,11 @@
-import { Mutex, type UnlockToken, _unlockTokenBuffer } from './mutex.js'
-import { isBrowserMainThread } from './util.js'
+import { type UnlockToken, tryLock, getUnlockTokenBuffer } from './mutex.js'
+import { assertBufferView, isBigInt64Array, wait, type BufferView } from './util.js'
 
-const _conditionBuffer = new WeakMap<Condition, Int32Array | BigInt64Array>()
+const _conditionBuffer = new WeakMap<Condition, BufferView>()
 
 export class Condition {
-  constructor (buffer: Int32Array | BigInt64Array) {
-    if (buffer.BYTES_PER_ELEMENT !== 4 && buffer.BYTES_PER_ELEMENT !== 8) {
-      throw new TypeError('Invalid buffer type')
-    }
+  constructor (buffer: BufferView) {
+    assertBufferView(buffer)
     _conditionBuffer.set(this, buffer)
   }
 
@@ -23,7 +21,7 @@ export class Condition {
    * Returns undefined.
    */
   static wait (cv: Condition, unlockToken: UnlockToken): void {
-    this.waitFor(cv, unlockToken, Infinity)
+    tryWait(cv, unlockToken, Infinity)
   }
 
   /**
@@ -43,71 +41,7 @@ export class Condition {
    * if timed out.
    */
   static waitFor (cv: Condition, unlockToken: UnlockToken, timeout: number, predicate?: () => boolean): boolean {
-    if (typeof timeout !== 'number') {
-      throw new TypeError('Invalid timeout')
-    }
-    timeout = Number.isNaN(timeout) ? Infinity : Math.max(timeout, 0)
-
-    if (!unlockToken.locked) {
-      throw new TypeError('Invalid unlock token')
-    }
-
-    const buffer = _conditionBuffer.get(cv)
-    if (!buffer) {
-      throw new TypeError('Invalid condition variable')
-    }
-
-    const start = isFinite(timeout) ? Date.now() : 0
-
-    if (isBrowserMainThread) {
-      const lockBuffer = _unlockTokenBuffer.get(unlockToken)
-      while (predicate ? !predicate() : true) {
-        const value = Atomics.load(buffer as Int32Array, 0)
-        if (!unlockToken.unlock()) {
-          throw new TypeError('Invalid unlock token')
-        }
-        let isTimeout = false
-        do {
-          if (value !== Atomics.load(buffer as Int32Array, 0)) {
-            break
-          }
-          if (isFinite(timeout) && Date.now() - start >= timeout) {
-            isTimeout = true
-            break
-          }
-        } while (true)
-        Mutex.lock(new Mutex(lockBuffer), unlockToken)
-        if (isTimeout) {
-          return predicate ? predicate() : false
-        }
-        if (!predicate) break
-      }
-      return true
-    }
-
-    const lockBuffer = _unlockTokenBuffer.get(unlockToken)
-    while (predicate ? !predicate() : true) {
-      const value = Atomics.load(buffer as Int32Array, 0)
-      if (!unlockToken.unlock()) {
-        throw new TypeError('Invalid unlock token')
-      }
-      const result = Atomics.wait(buffer as Int32Array, 0, value, timeout)
-      Mutex.lock(new Mutex(lockBuffer), unlockToken)
-      if (result === 'not-equal') {
-        throw new TypeError('Illegal state')
-      }
-      if (result === 'timed-out') {
-        return false
-      }
-      if (!predicate) break
-      if (isFinite(timeout)) {
-        timeout -= Date.now() - start
-        if (timeout <= 0) {
-          return predicate()
-        }
-      }
-    }
-    return true
+    return tryWait(cv, unlockToken, timeout, predicate)
   }
 
   /**
@@ -116,16 +50,51 @@ export class Condition {
    * Returns the number of waiters that were notified.
    */
   static notify (cv: Condition, count: number = Infinity): number {
-    count = Number.isNaN(count) ? Infinity : Math.max(count, 1)
+    if (!(cv instanceof Condition)) {
+      throw new TypeError(`${Object.prototype.toString.call(cv)} is not a Condition.`)
+    }
+    count = isNaN(count) ? Infinity : Math.max(count, 1)
     const buffer = _conditionBuffer.get(cv)
-    if (!buffer) {
-      throw new TypeError('Invalid condition variable')
-    }
-    if (buffer.BYTES_PER_ELEMENT === 8) {
-      Atomics.add(buffer as BigInt64Array, 0, BigInt(1))
-    } else {
-      Atomics.add(buffer as Int32Array, 0, 1)
-    }
+    Atomics.add(buffer as Int32Array, 0, (isBigInt64Array(buffer) ? BigInt(1) : 1) as number)
     return Atomics.notify(buffer as Int32Array, 0, count)
   }
+}
+
+function tryWait (cv: Condition, unlockToken: UnlockToken, timeout: number, predicate?: () => boolean): boolean {
+  if (!(cv instanceof Condition)) {
+    throw new TypeError(`${Object.prototype.toString.call(cv)} is not a Condition.`)
+  }
+
+  const lockBuffer = getUnlockTokenBuffer(unlockToken)
+  if (!lockBuffer) {
+    throw new Error('Empty UnlockToken')
+  }
+
+  const buffer = _conditionBuffer.get(cv)
+  timeout = isNaN(timeout) ? Infinity : Math.max(timeout, 0)
+  const finite = isFinite(timeout)
+  const start = finite ? Date.now() : 0
+
+  while (predicate ? !predicate() : true) {
+    const value = Atomics.load(buffer as Int32Array, 0)
+    if (!unlockToken.unlock()) {
+      throw new TypeError('Invalid unlock token')
+    }
+    const result = wait(buffer as Int32Array, 0, value, timeout)
+    tryLock(lockBuffer, Infinity, unlockToken)
+    if (result === 'not-equal') {
+      throw new TypeError('Illegal state')
+    }
+    if (result === 'timed-out') {
+      return false
+    }
+    if (!predicate) break
+    if (finite) {
+      timeout -= Date.now() - start
+      if (timeout <= 0) {
+        return predicate()
+      }
+    }
+  }
+  return true
 }

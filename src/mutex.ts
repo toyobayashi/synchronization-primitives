@@ -1,40 +1,39 @@
-import { isBrowserMainThread } from './util.js'
+import { wait, type BufferView, isBigInt64Array, assertBufferView } from './util.js'
 
-const _mutexBuffer = new WeakMap<Mutex, Int32Array | BigInt64Array>()
-export const _unlockTokenBuffer = new WeakMap<UnlockToken, Int32Array | BigInt64Array | null>()
+const _mutexBuffer = new WeakMap<Mutex, BufferView>()
+const _unlockTokenBuffer = new WeakMap<UnlockToken, BufferView | null>()
 
+export function getUnlockTokenBuffer (unlockToken: UnlockToken): BufferView | null {
+  return _unlockTokenBuffer.get(unlockToken)
+}
+
+function isLocked (unlockToken: UnlockToken): boolean {
+  return getUnlockTokenBuffer(unlockToken) !== null
+}
+
+/** @public */
 export class UnlockToken {
   constructor () {
     _unlockTokenBuffer.set(this, null)
   }
 
   get locked (): boolean {
-    const buffer = _unlockTokenBuffer.get(this)
-    if (!buffer) {
-      return false
-    }
-
-    return Boolean(Atomics.load(buffer as any, 0))
+    return isLocked(this)
   }
 
   unlock (): boolean {
-    const buffer = _unlockTokenBuffer.get(this)
+    const buffer = getUnlockTokenBuffer(this)
     if (!buffer) {
       return false
     }
 
-    if (buffer.BYTES_PER_ELEMENT === 8) {
-      if (Atomics.compareExchange(buffer as BigInt64Array, 0, BigInt(1), BigInt(0)) !== BigInt(1)) {
-        return false
-      }
-      Atomics.notify(buffer as BigInt64Array, 0, 1)
-    } else {
-      if (Atomics.compareExchange(buffer as Int32Array, 0, 1, 0) !== 1) {
-        return false
-      }
-      Atomics.notify(buffer as Int32Array, 0, 1)
+    const [expected, replacement] = isBigInt64Array(buffer) ? [BigInt(1), BigInt(0)] : [1, 0]
+
+    if (Atomics.compareExchange(buffer as Int32Array, 0, expected as number, replacement as number) !== expected) {
+      return false
     }
     _unlockTokenBuffer.set(this, null)
+    Atomics.notify(buffer as any, 0, 1)
     return true
   }
 
@@ -55,11 +54,10 @@ if (typeof Symbol.dispose === 'symbol') {
   })
 }
 
+/** @public */
 export class Mutex {
-  constructor (buffer: Int32Array | BigInt64Array) {
-    if (buffer.BYTES_PER_ELEMENT !== 4 && buffer.BYTES_PER_ELEMENT !== 8) {
-      throw new TypeError('Invalid buffer type')
-    }
+  constructor (buffer: BufferView) {
+    assertBufferView(buffer)
     _mutexBuffer.set(this, buffer)
   }
 
@@ -75,7 +73,11 @@ export class Mutex {
    * Otherwise return the unlockToken that was passed in.
    */
   static lock (mutex: Mutex, unlockToken?: UnlockToken): UnlockToken {
-    return this.lockIfAvailable(mutex, Infinity, unlockToken)!
+    if (!(mutex instanceof Mutex)) {
+      throw new TypeError(`${Object.prototype.toString.call(mutex)} is not a Mutex`)
+    }
+    const buffer = _mutexBuffer.get(mutex)
+    return tryLock(buffer, Infinity, unlockToken)!
   }
 
   /**
@@ -91,55 +93,47 @@ export class Mutex {
    * unlockToken behaves as it does in the lock method.
    */
   static lockIfAvailable (mutex: Mutex, timeout: number, unlockToken?: UnlockToken): UnlockToken | null {
-    if (typeof timeout !== 'number') {
-      throw new TypeError('Invalid timeout')
+    if (!(mutex instanceof Mutex)) {
+      throw new TypeError(`${Object.prototype.toString.call(mutex)} is not a Mutex`)
     }
-    timeout = Number.isNaN(timeout) ? Infinity : Math.max(timeout, 0)
-
     const buffer = _mutexBuffer.get(mutex)
-    if (!buffer) {
-      throw new TypeError('Invalid mutex')
-    }
-
-    const index = 0
-    const start = isFinite(timeout) ? Date.now() : 0
-    
-    const expected = buffer.BYTES_PER_ELEMENT === 8 ? BigInt(0) as unknown as number : 0
-    const replacement = buffer.BYTES_PER_ELEMENT === 8 ? BigInt(1) as unknown as number : 1
-
-    if (isBrowserMainThread) {
-      do {
-        if (expected === Atomics.compareExchange(buffer as Int32Array, index, expected, replacement)) {
-          break
-        }
-        if (isFinite(timeout) && Date.now() - start >= timeout) {
-          return null
-        }
-      } while (true)
-    } else {
-      do {
-        const result = Atomics.compareExchange(buffer as Int32Array, index, expected, replacement)
-        if (expected === result) {
-          break
-        }
-        if (timeout === 0 || Atomics.wait(buffer as Int32Array, index, result, timeout) === 'timed-out') {
-          return null
-        }
-        if (isFinite(timeout)) {
-          timeout = Math.max(timeout - (Date.now() - start), 0)
-        }
-      } while (true)
-    }
-
-    if (!unlockToken) {
-      unlockToken = new UnlockToken()
-    } else {
-      if (unlockToken.locked) {
-        throw new TypeError('UnlockToken is already locked')
-      }
-    }
-    _unlockTokenBuffer.set(unlockToken, buffer)
-
-    return unlockToken
+    return tryLock(buffer, timeout, unlockToken)
   }
+}
+
+export function tryLock (buffer: BufferView, timeout: number, unlockToken?: UnlockToken): UnlockToken | null {
+  timeout = isNaN(timeout) ? Infinity : Math.max(timeout, 0)
+  const index = 0
+  const finite = isFinite(timeout)
+  if (unlockToken == null) {
+    unlockToken = new UnlockToken()
+  } else {
+    if (!(unlockToken instanceof UnlockToken)) {
+      throw new TypeError(`${Object.prototype.toString.call(unlockToken)} is not an UnlockToken`)
+    }
+
+    if (isLocked(unlockToken)) {
+      throw new Error('UnlockToken is not empty')
+    }
+  }
+
+  const [expected, replacement] = isBigInt64Array(buffer) ? [BigInt(0), BigInt(1)] : [0, 1]
+  const start = finite ? Date.now() : 0
+
+  do {
+    const result = Atomics.compareExchange(buffer as Int32Array, index, expected as number, replacement as number)
+    if (expected === result) {
+      break
+    }
+    if (wait(buffer as Int32Array, index, result, timeout) === 'timed-out') {
+      return null
+    }
+    if (finite) {
+      timeout = Math.max(timeout - (Date.now() - start), 0)
+    }
+  } while (true)
+
+  _unlockTokenBuffer.set(unlockToken, buffer)
+
+  return unlockToken
 }

@@ -1,5 +1,27 @@
 if (typeof process === 'object' && process !== null && process.versions && process.versions.node) {
-  const { Worker: NodeWorker, parentPort } = await import('worker_threads')
+  const {
+    0: {
+      Worker: NodeWorker,
+      parentPort
+    },
+    1: {
+      join,
+      dirname
+    },
+    2: {
+      existsSync
+    },
+    3: {
+      fileURLToPath
+    }
+  } = await Promise.all([
+    import('worker_threads'),
+    import('path'),
+    import('fs'),
+    import('url')
+  ])
+  const __filename = fileURLToPath(import.meta.url)
+  const __dirname = dirname(__filename)
 
   /* const worker = `
   import { createRequire } from "node:module";
@@ -20,118 +42,176 @@ if (typeof process === 'object' && process !== null && process.versions && proce
     })
   }
 
-  class Worker extends NodeWorker {
-    constructor(filename, options = {}) {
-      // options.workerData ??= {};
-      // options.workerData.__ts_worker_filename = filename.toString();
-      // super(new URL(`data:text/javascript,${worker}`), options);
-      super(filename, options);
-
-      this._eventMap = Object.create(null);
-
-      this.__onmessage = (e) => {
-        this._onmessage?.({ data: e });
-      }
-
-      this.__onmessageerror = (e) => {
-        this._onmessageerror?.(e);
-      };
-
-      this.__onerror = (e) => {
-        this._onerror?.(e);
-      };
+  const _eventInit = new WeakMap();
+  class ErrorEvent extends Event {
+    constructor (type, init) {
+      super(type, init);
+      _eventInit.set(this, init);
     }
 
-    get onmessage() {
-      return this._onmessage;
+    get colno () {
+      return _eventInit.get(this)?.colno;
     }
 
-    set onmessage (f) {
-      const _onmessage = this._onmessage;
-      this._onmessage = f;
-      if (!_onmessage && f) {
-        this.on('message', this.__onmessage);
-      } else if (_onmessage && !f) {
-        this.off('message', this.__onmessage);
-      }
+    get error () {
+      return _eventInit.get(this)?.error;
     }
 
-    get onmessageerror() {
-      return this._onmessageerror;
+    get filename () {
+      return _eventInit.get(this)?.filename;
     }
 
-    set onmessageerror(f) {
-      const _onmessageerror = this._onmessageerror;
-      this._onmessageerror = f;
-      if (!_onmessageerror && f) {
-        this.on('messageerror', this.__onmessageerror);
-      } else if (_onmessageerror && !f) {
-        this.off('messageerror', this.__onmessageerror);
-      }
+    get lineno () {
+      return _eventInit.get(this)?.lineno;
     }
 
-    get onerror() {
-      return this._onerror;
-    }
-
-    set onerror(f) {
-      const _onerror = this._onerror;
-      this._onerror = f;
-      if (!_onerror && f) {
-        this.on('error', this.__onerror);
-      } else if (_onerror && !f) {
-        this.off('error', this.__onerror);
-      }
-    }
-
-    addEventListener(type, listener, options) {
-      this._eventMap[type] = this._eventMap[type] ?? new Map();
-      if (this._eventMap[type].has(listener)) {
-        return;
-      }
-      const once = Boolean(options?.once);
-      let fn
-      if (type === 'message') {
-        fn = once ? function (data) {
-          this._eventMap[type].delete(listener);
-          listener({ data });
-        } : function (data) {
-          listener({ data });
-        }
-      } else {
-        fn = once ? function (e) {
-          this._eventMap[type].delete(listener);
-          listener(e);
-        } : function (e) {
-          listener(e);
-        }
-      }
-      this._eventMap[type].set(listener, fn);
-      if (once) {
-        this.once(type, fn);
-      } else {
-        this.on(type, fn);
-      }
-    }
-
-    removeEventListener(type, listener) {
-      if (!this._eventMap[type]) {
-        return;
-      }
-      const fn = this._eventMap[type].get(listener);
-      if (!fn) {
-        return;
-      }
-      this.off(type, fn);
-      this._eventMap[type].delete(listener);
+    get message () {
+      return _eventInit.get(this)?.message;
     }
   }
 
+  const _worker = new WeakMap();
+  const _onerror = new WeakMap();
+  const _onmessage = new WeakMap();
+  const _onmessageerror = new WeakMap();
+
+  class Worker extends EventTarget {
+    constructor(filename, options = {}) {
+      super()
+
+      if (typeof filename === 'string' && filename.startsWith('/')) {
+        const absolutePath = join(__dirname, '..', filename);
+        const url = new URL(`file://${absolutePath}`)
+        if (existsSync(url)) {
+          filename = url
+        } else {
+          filename = new URL(`file://${filename}`);
+        }
+      }
+
+      // options.workerData ??= {};
+      // options.workerData.__ts_worker_filename = filename.toString();
+      // const nodeWorker = new NodeWorker(new URL(`data:text/javascript,${worker}`), options);
+      const nodeWorker = new NodeWorker(filename, options);
+      _worker.set(this, nodeWorker);
+
+      _onerror.set(this, null);
+      _onmessage.set(this, null);
+      _onmessageerror.set(this, null);
+
+      nodeWorker.on('error', (e) => {
+        const event = new ErrorEvent('error', {
+          error: e,
+          message: e.message
+        });
+        this.dispatchEvent(event);
+      })
+
+      nodeWorker.on('message', (data) => {
+        const event = new MessageEvent('message', {
+          data
+        });
+        this.dispatchEvent(event);
+      });
+
+      nodeWorker.on('messageerror', (e) => {
+        const event = new MessageEvent('messageerror', {
+          data: e
+        });
+        this.dispatchEvent(event);
+      });
+    }
+
+    postMessage (...args) {
+      const nodeWorker = _worker.get(this);
+      nodeWorker.postMessage(...args);
+    }
+
+    terminate () {
+      const nodeWorker = _worker.get(this);
+      nodeWorker.terminate();
+    }
+
+    ref () {
+      const nodeWorker = _worker.get(this);
+      nodeWorker.ref();
+    }
+
+    unref () {
+      const nodeWorker = _worker.get(this);
+      nodeWorker.unref();
+    }
+
+    get onmessage() {
+      return _onmessage.get(this);
+    }
+
+    set onmessage(f) {
+      if (typeof f !== 'function' && f !== null) f = null
+      const old = _onmessage.get(this);
+      _onmessage.set(this, f);
+      if (f === old) return;
+      if (old) this.removeEventListener('message', old)
+      if (f) this.addEventListener('message', f)
+    }
+
+    get onmessageerror() {
+      return _onmessageerror.get(this);
+    }
+
+    set onmessageerror(f) {
+      if (typeof f !== 'function' && f !== null) f = null
+      const old = _onmessageerror.get(this);
+      _onmessageerror.set(this, f);
+      if (f === old) return;
+      if (old) this.removeEventListener('messageerror', old)
+      if (f) this.addEventListener('messageerror', f)
+    }
+
+    get onerror() {
+      return _onerror.get(this);
+    }
+
+    set onerror(f) {
+      if (typeof f !== 'function' && f !== null) f = null
+      const old = _onerror.get(this);
+      _onerror.set(this, f);
+      if (f === old) return;
+      if (old) this.removeEventListener('error', old)
+      if (f) this.addEventListener('error', f)
+    }
+  }
+
+  Object.defineProperty(Worker, Symbol.toStringTag, {
+    value: 'Worker',
+    writable: false,
+    enumerable: false,
+    configurable: true
+  })
+
   Object.assign(globalThis, {
     self: globalThis,
-    postMessage: function (msg) {
-      parentPort?.postMessage(msg)
+    postMessage: function (...args) {
+      parentPort?.postMessage(...args)
     },
-    Worker
+    Worker,
+    ErrorEvent
   });
 }
+
+/* const postMessage = globalThis.postMessage
+globalThis.postMessage = function (...args) {
+  if (args[0] === 'exit') {
+    if (typeof __VITEST_COVERAGE__ === 'object' && __VITEST_COVERAGE__ !== null) {
+      return postMessage.call(globalThis, {
+        type: 'exit',
+        __VITEST_COVERAGE__
+      }, ...args.slice(1))
+    }
+  } else if (args[0].type === 'exit') {
+    if (typeof __VITEST_COVERAGE__ === 'object' && __VITEST_COVERAGE__ !== null) {
+      args[0].__VITEST_COVERAGE__ = __VITEST_COVERAGE__
+    }
+  }
+  return postMessage.call(globalThis, ...args)
+} */

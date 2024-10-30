@@ -1,8 +1,8 @@
 export class Counter {
   #valueView
 
-  constructor (Mutex, buffer) {
-    this.buffer = buffer ?? new SharedArrayBuffer(8)
+  constructor (useBigInt, Mutex, buffer) {
+    this.buffer = buffer ?? new SharedArrayBuffer(useBigInt ? 16 : 8)
     this.#valueView = new Int32Array(this.buffer, 0, 1)
 
     class LocableMutex extends Mutex {
@@ -15,7 +15,7 @@ export class Counter {
       }
     }
 
-    this.mutex = new LocableMutex(new Int32Array(this.buffer, 4, 1))
+    this.mutex = new LocableMutex(useBigInt ? new BigInt64Array(this.buffer, 8, 1) : new Int32Array(this.buffer, 4, 1))
   }
 
   get value () {
